@@ -29,6 +29,7 @@ const int pin_leds[8] = {5, 6, 7, 8, 9, 10, 11, 12};
 const int pin_switch = 13;
 
 bool ledOn = false;
+bool setLedOff = false;
 
 #define register_led 0 // register used to change the state of the leds
 uint8_t led_state = 0;
@@ -84,7 +85,13 @@ void update_leds(uint8_t new_state) {
 			new_state = new_state >> 1;
 		}
 	}
-	ledOn = true;
+	lastUpdate = millis();
+	if(new_state != 0){
+		ledOn = true;
+		setLedOff = false;
+	}else{
+		ledOn = false;
+	}
 }
 
 // interruption shutdown led
@@ -94,8 +101,7 @@ SIGNAL(TIMER0_COMPA_vect)
 		unsigned long currentMillis = millis();
 		if((currentMillis - lastUpdate) > updateInterval)  // time to update
 		{
-			update_leds(0);
-			ledOn = false;
+			setLedOff = true;
 		}
 	}
 }
@@ -123,7 +129,6 @@ void loop()
 			count = count_set_bits(new_state);
 		}while(count>5);
 		update_leds(new_state);
-		lastUpdate = millis();
 	}else{
 		if (rs485Serial.available()) {
 		    byte b = rs485Serial.read();
@@ -156,7 +161,6 @@ void loop()
 							new_state = (uint8_t) data2;
 						}
 						update_leds(new_state);
-						lastUpdate = millis();
 		        	} else {
 		        		Serial.println("CRC invalid");
 		        	}
@@ -166,6 +170,10 @@ void loop()
 		        state = WAIT_START;
 		        break;
 		    }
+		}
+		if(setLedOff && ledOn){
+			// we switch off the LEDs after timer update
+			update_leds(0);
 		}
 	}
 }
