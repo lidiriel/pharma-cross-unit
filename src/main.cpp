@@ -1,18 +1,14 @@
 #include <Arduino.h>
-#include <SoftwareSerial.h>
-
-#define DEBUG false
-#define Serial if(DEBUG)Serial
 
 #define CROSS_B // define CROSS_A or CROSS_B
 
 #define pin_rs485_de 2
-#define pin_rx 3
-#define pin_tx 4
-SoftwareSerial rs485Serial(pin_rx, pin_tx);
 
 // baud rate 9600 19200 38400 57600 76800 115200
-#define com_baud 115200
+// Hardware serial on pins 0(RX)/1(TX) — much more reliable than SoftwareSerial at high baud rates
+// 76800 has only 0.16% error on 16MHz vs 2.1% for 57600
+#define com_baud 76800
+#define rs485Serial Serial
 
 #ifdef CROSS_A
 #define unit_id 1
@@ -25,11 +21,11 @@ SoftwareSerial rs485Serial(pin_rx, pin_tx);
 const int pin_led_user = LED_BUILTIN;
 // output pin for controlling LEDs (4 blues, 4 green)
 const int pin_leds[8] = {5, 6, 7, 8, 9, 10, 11, 12};
-
 const int pin_switch = 13;
+const int pin_error = 14;
 
 bool ledOn = false;
-bool setLedOff = false;
+volatile bool tick = false;
 
 #define register_led 0 // register used to change the state of the leds
 uint8_t led_state = 0;
@@ -37,6 +33,7 @@ uint8_t new_state = 0;
 
 unsigned long lastUpdate;
 unsigned long updateInterval = 500;
+unsigned long currentMillis = 0;
 
 byte crc8(byte *data, byte len) {
   byte crc = 0x00;
@@ -55,12 +52,14 @@ byte crc8(byte *data, byte len) {
 void setup()
 {
 	pinMode(pin_switch, INPUT_PULLUP);
+	pinMode(pin_error, OUTPUT);
+	digitalWrite(pin_error, LOW);
 	pinMode(pin_rs485_de, OUTPUT);
 	digitalWrite(pin_rs485_de, LOW);
-	Serial.begin(9600);
-	Serial.println("start setup");
-	rs485Serial.begin(com_baud);
-	// configure and check outputs LEDs
+	// 1 start, 2 stop, no parity, eight bits
+	rs485Serial.begin(com_baud, SERIAL_8N2);
+
+	// Configure and check outputs LEDs
 	for(int i=0; i<8; i++){
 		int pin = pin_leds[i];
 		pinMode(pin, OUTPUT);
@@ -69,14 +68,24 @@ void setup()
 		digitalWrite(pin, LOW);
 		delay(250);
 	}
-	// Timer0 is already used for millis() - we'll just interrupt somewhere
-	// in the middle and call the "Compare A" function below
-	OCR0A = 0xAF;
-	TIMSK0 |= _BV(OCIE0A);
-	Serial.println("end setup");
+
+	// Configure TIMER 1 for interrupts
+	cli();						// Disable interrupts while configuring
+	// CTC Mode with Timer 1 (keeping millis intact, use timer0)
+	TCCR1A = 0; 				// Clear control register A
+  	TCCR1B = (1 << WGM12);       // CTC mode (OCR1A as TOP)
+	// prescaler = 1024 (CS12+CS10)
+    TCCR1B |=  (1 << CS12) | (1 << CS10);    
+	TCNT1  = 0;                 // Reset counter
+	// OCR1A = (F_CPU / (Prescaler × Frequency)) - 1
+	// F_CPU = 16MHz
+  	OCR1A = 7811;               // Fires every 500ms at 16MHz
+  	TIMSK1 = (1 << OCIE1A);     // Enable compare match interrupt
+  	sei();						// Re-enable interrupts
 }
 
 void update_leds(uint8_t new_state) {
+	uint8_t state = new_state;
 	if (new_state != led_state) {
 		led_state = new_state;
 		for (int i = 0; i < 8; i++) {
@@ -86,24 +95,17 @@ void update_leds(uint8_t new_state) {
 		}
 	}
 	lastUpdate = millis();
-	if(new_state != 0){
-		ledOn = true;
-		setLedOff = false;
-	}else{
+	if(state == 0){
 		ledOn = false;
+	}else{
+		ledOn = true;
 	}
 }
 
 // interruption shutdown led
-SIGNAL(TIMER0_COMPA_vect)
+SIGNAL(TIMER1_COMPA_vect)
 {
-	if(ledOn){
-		unsigned long currentMillis = millis();
-		if((currentMillis - lastUpdate) > updateInterval)  // time to update
-		{
-			setLedOff = true;
-		}
-	}
+	tick = true;
 }
 
 int count_set_bits(unsigned int num)
@@ -161,19 +163,26 @@ void loop()
 							new_state = (uint8_t) data2;
 						}
 						update_leds(new_state);
+						digitalWrite(pin_error, LOW);
 		        	} else {
-		        		Serial.println("CRC invalid");
+		        		// "CRC invalid"
+						digitalWrite(pin_error, HIGH);
 		        	}
 		        } else {
-		        	Serial.println("stop byte invalid");
+		        	// "stop byte invalid"
+					digitalWrite(pin_error, HIGH);
 		        }
 		        state = WAIT_START;
 		        break;
 		    }
 		}
-		if(setLedOff && ledOn){
-			// we switch off the LEDs after timer update
-			update_leds(0);
+
+		if(tick && ledOn){
+			currentMillis = millis();
+			if((currentMillis - lastUpdate) > updateInterval)  // time to update
+			{
+				update_leds(0);
+			}
 		}
 	}
 }
